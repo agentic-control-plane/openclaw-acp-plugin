@@ -1,0 +1,35 @@
+{
+  "name": "@gatewaystack/acp-governance",
+  "version": "0.1.0",
+  "description": "Agentic Control Plane governance for OpenClaw — identity, audit, and policy enforcement for every tool call via ACP",
+  "license": "MIT",
+  "author": "David Crowe <david@reducibl.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gatewaystack/openclaw-acp-plugin"
+  },
+  "main": "dist/plugin.js",
+  "openclaw": {
+    "extensions": [
+      "./dist/plugin.js"
+    ]
+  },
+  "files": [
+    "dist/",
+    "src/",
+    "openclaw.plugin.json",
+    "install.sh",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "typescript": "^5.4.0"
+  }
+}

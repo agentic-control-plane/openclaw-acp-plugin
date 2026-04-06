@@ -1,0 +1,11 @@
+{
+  "id": "acp-governance",
+  "name": "Agentic Control Plane",
+  "description": "Identity, governance, and audit for every OpenClaw tool call via ACP. Every tool call is logged, policy-enforced, and visible in your ACP dashboard.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

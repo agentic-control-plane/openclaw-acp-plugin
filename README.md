@@ -73,4 +73,4 @@ openclaw plugins uninstall acp-governance
 ## Support
 
 - Site: https://agenticcontrolplane.com
-- Issues: https://github.com/gatewaystack/openclaw-acp-plugin/issues
+- Issues: https://github.com/davidcrowe/openclaw-acp-plugin/issues

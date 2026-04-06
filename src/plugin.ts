@@ -1,46 +1,60 @@
-/**
- * Agentic Control Plane — OpenClaw Plugin
- *
- * Registers a `before_tool_call` hook that sends every tool invocation
- * to ACP for governance. ACP handles identity, policy evaluation, rate
- * limiting, content scanning, and audit logging server-side.
- *
- * The agent cannot bypass this — it runs at the process level.
- *
- * Install:
- *   openclaw plugins install @gatewaystack/acp-governance
- *
- * Configure:
- *   Store ACP credentials: ~/.acp/credentials
- *   (Run install.sh or set up via ACP dashboard)
- */
-
 import { checkAcpGovernance } from "./govern.js";
 
-// Map OpenClaw agent IDs to ACP tiers
-function resolveAgentTier(agentId: string): string {
-  // OpenClaw agent IDs: "main" (primary), "ops", "dev", custom names
-  // "main" = the primary interactive agent → interactive tier
-  // Sub-agents spawned for tasks → subagent tier
-  // Everything else → interactive as safe default
-  if (agentId === "main") return "interactive";
-  if (agentId === "unknown") return "interactive";
-  return "subagent"; // named agents are sub-agents
+// Matches openclaw/plugin-sdk/plugin-entry types — declared here so we
+// don't need the full openclaw package (500MB+) as a build dependency.
+interface PluginHookBeforeToolCallEvent {
+  toolName: string;
+  params: Record<string, unknown>;
+  runId?: string;
+  toolCallId?: string;
 }
 
-const plugin = {
+interface PluginHookAgentContext {
+  runId: string;
+  agentId: string;
+  sessionKey: string;
+  sessionId: string;
+  modelProviderId: string;
+  modelId: string;
+  trigger: string;
+  channelId: string;
+}
+
+interface OpenClawPluginApi {
+  on(
+    hook: string,
+    handler: (event: any, ctx: any) => any,
+    opts?: { priority?: number; name?: string; description?: string }
+  ): void;
+}
+
+function resolveAgentTier(agentId: string): string {
+  if (agentId === "main") return "interactive";
+  if (agentId === "unknown") return "interactive";
+  return "subagent";
+}
+
+// Use definePluginEntry at runtime (resolved from openclaw peer dep),
+// fall back to plain object if not available (e.g. linked installs).
+let definePluginEntry: (opts: any) => any;
+try {
+  definePluginEntry = require("openclaw/plugin-sdk/plugin-entry").definePluginEntry;
+} catch {
+  definePluginEntry = (opts: any) => opts;
+}
+
+export default definePluginEntry({
   id: "acp-governance",
   name: "Agentic Control Plane",
   description:
     "Identity, governance, and audit for every tool call via the Agentic Control Plane. See all activity at cloud.agenticcontrolplane.com",
 
-  register(api: any) {
-    // before_tool_call: check with ACP, can block
+  register(api: OpenClawPluginApi) {
     api.on(
       "before_tool_call",
       async (
-        event: { toolName: string; params: Record<string, unknown> },
-        ctx: { agentId?: string; sessionKey?: string }
+        event: PluginHookBeforeToolCallEvent,
+        ctx: PluginHookAgentContext
       ) => {
         const agentId = ctx.agentId ?? "unknown";
         const result = await checkAcpGovernance({
@@ -62,11 +76,5 @@ const plugin = {
       },
       { priority: 0 }
     );
-
-    if (api.logger) {
-      api.logger.info("Agentic Control Plane governance active");
-    }
   },
-};
-
-export default plugin;
+});

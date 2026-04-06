@@ -6,7 +6,7 @@
   "author": "David Crowe <david@reducibl.com>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/gatewaystack/openclaw-acp-plugin"
+    "url": "https://github.com/davidcrowe/openclaw-acp-plugin"
   },
   "main": "dist/plugin.js",
   "types": "dist/plugin.d.ts",

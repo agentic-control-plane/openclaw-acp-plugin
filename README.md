@@ -17,7 +17,7 @@ This installs the plugin, opens your browser to sign up / log in, provisions you
 Or install manually:
 
 ```bash
-openclaw plugins install @gatewaystack/acp-governance
+openclaw plugins install @agenticcontrolplane/openclaw
 ```
 
 ## How it works
@@ -67,7 +67,7 @@ mv ~/.acp/credentials.paused ~/.acp/credentials
 
 # Fully remove
 rm -rf ~/.acp
-openclaw plugins uninstall acp-governance
+openclaw plugins uninstall @agenticcontrolplane/openclaw
 ```
 
 ## Support

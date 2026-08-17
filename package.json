@@ -27,6 +27,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --test test/",
     "prepublishOnly": "npm run build"
   },
   "engines": {

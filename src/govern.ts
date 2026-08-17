@@ -2,7 +2,7 @@ import { getApiBase, readToken } from "./credentials.js";
 
 export type GovernResult = {
   allowed: boolean;
-  decision: "allow" | "deny";
+  decision: "allow" | "deny" | "ask";
   reason: string;
 };
 
@@ -54,10 +54,25 @@ export async function checkAcpGovernance(opts: {
       reason?: string;
     };
 
+    // Only an explicit "allow" proceeds. OpenClaw's hook API has no ask
+    // primitive, so an "ask" verdict blocks with the approval reason — the
+    // server fail-closes unconsumed step_up the same way. Unknown decision
+    // values also block: a verdict this client doesn't understand must not
+    // fall open (the pre-#444 "ask" bug class).
+    if (data.decision === "allow") {
+      return { allowed: true, decision: "allow", reason: data.reason || "allow" };
+    }
+    if (data.decision === "ask") {
+      return {
+        allowed: false,
+        decision: "ask",
+        reason: data.reason || "requires approval — approve in the ACP console, then retry",
+      };
+    }
     return {
-      allowed: data.decision !== "deny",
-      decision: data.decision as "allow" | "deny",
-      reason: data.reason || data.decision,
+      allowed: false,
+      decision: "deny",
+      reason: data.reason || data.decision || "denied by policy",
     };
   } catch {
     return { allowed: true, decision: "allow", reason: "acp-network-error" };

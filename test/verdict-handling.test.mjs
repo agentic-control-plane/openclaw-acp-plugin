@@ -60,5 +60,8 @@ test("network error keeps the documented fail-open posture", async () => {
   };
   const r = await checkAcpGovernance(CALL);
   assert.equal(r.allowed, true);
-  assert.equal(r.reason, "acp-network-error");
+  // The posture is unchanged; the reason is no longer an opaque slug. An
+  // outage that runs a call ungoverned has to say so where a human sees it.
+  assert.equal(r.ungoverned, true);
+  assert.match(r.reason, /unreachable .*network error.*UNGOVERNED/);
 });

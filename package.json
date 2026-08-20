@@ -1,6 +1,6 @@
 {
   "name": "@agenticcontrolplane/openclaw",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Agentic Control Plane governance for OpenClaw — identity, audit, and policy enforcement for every tool call via ACP",
   "license": "MIT",
   "author": "David Crowe <david@reducibl.com>",

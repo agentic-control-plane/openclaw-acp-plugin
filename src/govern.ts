@@ -1,4 +1,59 @@
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 import { getApiBase, readToken } from "./credentials.js";
+
+export const PLUGIN_VERSION = "0.2.1";
+
+export const KEY_REJECTED_FIX =
+  "Fix: re-run the installer (curl -sf https://agenticcontrolplane.com/install.sh | bash) or create a key at https://cloud.agenticcontrolplane.com/settings/api-keys and save it: echo 'gsk_...' > ~/.acp/credentials";
+export const WORKSPACE_DELETED_FIX =
+  "The ACP workspace this machine was connected to has been deleted. To remove ACP from this machine: acp-uninstall (older installs without it: curl -sf https://agenticcontrolplane.com/uninstall.sh | bash). To keep using ACP, re-run the installer: curl -sf https://agenticcontrolplane.com/install.sh | bash";
+
+const DELETED_NOTICE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function lapseLine(fields: Record<string, unknown>): void {
+  try {
+    mkdirSync(join(homedir(), ".acp"), { recursive: true });
+    appendFileSync(
+      join(homedir(), ".acp", "lapse.log"),
+      `${JSON.stringify({ at: new Date().toISOString(), client: "openclaw-plugin", ...fields })}\n`,
+    );
+  } catch {
+    /* the lapse log is best-effort — never block a call on it */
+  }
+}
+
+/**
+ * True the first time the workspace-deleted notice is asked for in a session,
+ * false after (marker ~/.acp/notices/workspace-deleted.<session>, created with
+ * the `wx` flag — shared with the other ACP harness plugins on this machine).
+ * With no session id, at most once per 24h via a timestamp marker. Fails
+ * toward showing: an unwritable marker repeats, never vanishes.
+ */
+export function firstDeletedNotice(sessionId: string | undefined, now = Date.now()): boolean {
+  const dir = join(homedir(), ".acp", "notices");
+  const id = String(sessionId ?? "").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
+  try {
+    mkdirSync(dir, { recursive: true });
+    if (!id || id === "unknown") {
+      const marker = join(dir, "workspace-deleted.no-session");
+      let last = 0;
+      try {
+        last = Date.parse(readFileSync(marker, "utf8").trim()) || 0;
+      } catch {
+        /* absent */
+      }
+      if (now - last < DELETED_NOTICE_WINDOW_MS) return false;
+      writeFileSync(marker, new Date(now).toISOString());
+      return true;
+    }
+    writeFileSync(join(dir, `workspace-deleted.${id}`), new Date(now).toISOString(), { flag: "wx" });
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code !== "EEXIST";
+  }
+}
 
 export type GovernResult = {
   allowed: boolean;
@@ -59,6 +114,38 @@ export async function checkAcpGovernance(opts: {
     };
   }
 
+  // A 401/403 is NOT the gateway being down — it is this machine's key being
+  // revoked, mistyped, or from a deleted workspace. Reading it as "gateway
+  // returned HTTP 401" left a user running ungoverned believing it was our
+  // outage. Same tier posture as an outage (interactive fails open,
+  // unattended stays blocked), but the message names the cause and the fix.
+  // `code: "workspace_deleted"`: the owner deleted the workspace on purpose —
+  // say so once per session with how to remove ACP, then proceed silently
+  // (the lapse is still logged). (gatewaystack-connect#1693, ported from
+  // codex-acp-plugin / pi-acp-plugin.)
+  function keyRejected(status: number, code: string | undefined): GovernResult {
+    const deleted = code === "workspace_deleted";
+    const fix = deleted ? WORKSPACE_DELETED_FIX : KEY_REJECTED_FIX;
+    if (failsOpen) {
+      lapseLine({ kind: "UNGOVERNED", tool: opts.toolName, tier, detail: `key rejected (HTTP ${status})` });
+      if (deleted && !firstDeletedNotice(opts.sessionKey)) {
+        return { allowed: true, decision: "acp-key-rejected", reason: "workspace deleted (notice already shown)" };
+      }
+      return {
+        allowed: true,
+        decision: "acp-key-rejected",
+        reason: `⚠ KEY REJECTED (HTTP ${status}): the key in ~/.acp/credentials is revoked or invalid — this call proceeded UNGOVERNED and unlogged, and every call will until it is fixed. ${fix}`,
+        ungoverned: true,
+      };
+    }
+    return {
+      allowed: false,
+      decision: "acp-key-rejected",
+      reason: `Key rejected (HTTP ${status}) — the key in ~/.acp/credentials is revoked or invalid; ${tier} tier stays blocked until it is fixed. ${fix}`,
+      ungoverned: true,
+    };
+  }
+
   const token = readToken();
   if (!token) {
     return outage("no-acp-credentials", "no ACP credentials found at ~/.acp/credentials");
@@ -73,7 +160,7 @@ export async function checkAcpGovernance(opts: {
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
-        "X-GS-Client": "openclaw-acp-plugin/0.1.1",
+        "X-GS-Client": `openclaw-acp-plugin/${PLUGIN_VERSION}`,
       },
       body: JSON.stringify({
         tool_name: opts.toolName,
@@ -86,6 +173,17 @@ export async function checkAcpGovernance(opts: {
     });
 
     clearTimeout(timeout);
+
+    if (res.status === 401 || res.status === 403) {
+      let code: string | undefined;
+      try {
+        const errBody = (await res.json()) as { code?: unknown } | null;
+        if (typeof errBody?.code === "string") code = errBody.code;
+      } catch {
+        /* empty or non-JSON body — still a key rejection */
+      }
+      return keyRejected(res.status, code);
+    }
 
     if (!res.ok) {
       return outage("acp-http-error", `ACP gateway returned HTTP ${res.status}`);

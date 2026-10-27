@@ -93,6 +93,10 @@ export async function checkAcpGovernance(opts: {
   agentId: string;
   sessionKey?: string;
   agentTier?: string;
+  // #1518: the host's runtime probe for whether its approval service is
+  // present (PluginApprovalResolutions). Sent only on the PreToolUse call.
+  // When true, the plugin renders a native approval prompt on "ask".
+  approvalServiceAvailable?: boolean;
 }): Promise<GovernResult> {
   const tier = opts.agentTier || "interactive";
   const failsOpen = tier === "interactive";
@@ -168,6 +172,14 @@ export async function checkAcpGovernance(opts: {
         session_id: opts.sessionKey,
         agent_tier: tier,
         client: { name: "OpenClaw", version: "0.1.0" },
+        // #1518: positive claim only from the runtime probe; false is a
+        // positive "nobody will see a dialog" and always wins at the gateway.
+        ...(typeof opts.approvalServiceAvailable === "boolean"
+          ? {
+              attended: { claim: opts.approvalServiceAvailable, source: "approval-service" },
+              ...(opts.approvalServiceAvailable ? { capabilities: ["native_ask"] } : {}),
+            }
+          : {}),
       }),
       signal: controller.signal,
     });

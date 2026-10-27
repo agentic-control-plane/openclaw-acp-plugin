@@ -152,6 +152,13 @@ export default definePluginEntry({
           agentId,
           sessionKey: ctx.sessionKey,
           agentTier: resolveAgentTier(agentId),
+          approvalServiceAvailable: (() => {
+            try {
+              return hostSupportsRequireApproval();
+            } catch {
+              return false; // a probe that throws is not a claim of attendance
+            }
+          })(),
         });
 
         // before_tool_call's return value only merges params/block/

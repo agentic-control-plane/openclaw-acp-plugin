@@ -1,10 +1,6 @@
-# Agentic Control Plane — OpenClaw Plugin
+# Agentic Control Plane: OpenClaw Plugin
 
-Identity, governance, and audit for every OpenClaw tool call.
-
-When active, every tool call your OpenClaw agent makes — `read`, `write`, `exec`, `web_search`, and all custom tools — is logged to your ACP workspace. Set policies to control what's allowed. Get full compliance visibility across your team.
-
-ACP doesn't replace your tools or change how you use OpenClaw. It's the governance layer that sits transparently in front of everything.
+Checks every OpenClaw tool call against your Agentic Control Plane rules before it runs, and logs it. That covers `read`, `write`, `exec`, `web_search` and all custom tools. Calls are logged to your ACP workspace, and the plugin needs a workspace key.
 
 ## One-command install
 
@@ -12,7 +8,7 @@ ACP doesn't replace your tools or change how you use OpenClaw. It's the governan
 curl -sf https://agenticcontrolplane.com/install-openclaw.sh | bash
 ```
 
-This installs the plugin, opens your browser to sign up / log in, provisions your workspace, and activates the governance hook. You'll land on your audit log dashboard — done.
+This installs the plugin, opens your browser to sign up or log in, provisions your workspace, and activates the hook. You land on your audit log dashboard.
 
 Or install manually:
 
@@ -20,24 +16,26 @@ Or install manually:
 openclaw plugins install @agenticcontrolplane/openclaw
 ```
 
+The main installer (`curl -sf https://agenticcontrolplane.com/install.sh | bash`) also installs this plugin when it finds `openclaw` on your machine.
+
 ## How it works
 
 The plugin registers a `before_tool_call` hook that fires before every tool execution:
 
-1. Hook sends tool name + input to ACP's governance API
-2. ACP evaluates policies (agent tier, tool rules, rate limits, content scanning)
-3. Returns `allow` or `deny`
-4. All calls are logged to your workspace's audit trail
+1. The hook sends the tool name and input to ACP's governance API.
+2. ACP evaluates the safety floor and your policies (agent tier, tool rules, rate limits, content scanning).
+3. It returns `allow`, `ask` or `deny`. On an `ask`, if your OpenClaw build supports approval prompts the plugin uses OpenClaw's own prompt. Otherwise the call is blocked with an approval link: approve on the console or from the email, then retry.
+4. All calls are logged to your workspace's audit trail.
 
-The hook **fails open** on network errors — ACP outages never break your agent.
+If ACP is unreachable, calls from the `main` agent proceed with an UNGOVERNED warning. Calls from named agents (the subagent tier) are blocked until ACP answers. If hooks are switched off, nothing is checked.
 
 ## What you get
 
-- **Audit logs** — every tool call with identity, arguments, timestamps, decisions
-- **Policy enforcement** — allow/deny by agent tier, tool name, argument patterns
-- **Rate limits & budgets** — cap tool calls per minute, per month, or by cost
-- **Content scanning** — detect PII in tool inputs, optionally block or redact
-- **Team management** — multiple members, roles, workspace-level controls
+- **Audit logs:** every tool call with identity, arguments, timestamps and decisions.
+- **Policy enforcement:** allow, ask or deny by agent tier, tool name and argument patterns.
+- **Rate limits and budgets:** cap tool calls per minute, per month, or by cost.
+- **Content scanning:** detect PII in tool inputs, optionally block or redact.
+- **Team management:** multiple members, roles and workspace-level controls.
 
 ## Dashboard
 
@@ -53,8 +51,8 @@ OpenClaw agent IDs map to ACP governance tiers:
 
 | Agent ID | ACP Tier | Default policy |
 |---|---|---|
-| `main` | Interactive | Permissive — primary user agent |
-| Named agents (e.g. `ops`, `dev`) | Subagent | Moderate — spawned for tasks |
+| `main` | Interactive | Permissive; the primary user agent |
+| Named agents (e.g. `ops`, `dev`) | Subagent | Moderate; spawned for tasks |
 
 ## Pause / disable
 
@@ -73,4 +71,4 @@ openclaw plugins uninstall @agenticcontrolplane/openclaw
 ## Support
 
 - Site: https://agenticcontrolplane.com
-- Issues: https://github.com/davidcrowe/openclaw-acp-plugin/issues
+- Issues: https://github.com/agentic-control-plane/openclaw-acp-plugin/issues

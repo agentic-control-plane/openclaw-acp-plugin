@@ -38,6 +38,12 @@ const baseEvent = { toolName: "Bash", params: { command: "echo hi" } };
 // resolveAgentTier in src/plugin.ts.
 const interactiveCtx = { agentId: "main", sessionKey: "s1" };
 const backgroundCtx = { agentId: "ops-agent", sessionKey: "s1" };
+// A user-started turn of the main agent: the only context where a person
+// can be asked (with host approval support).
+const attendedCtx = { agentId: "main", sessionKey: "s1", trigger: "user" };
+const cronCtx = { agentId: "main", sessionKey: "s1", trigger: "cron" };
+const THREE_LINE_ASK =
+  "ACP (Agentic Control Plane) asks: run Bash `echo probe`?\nRule: shell commands need approval\nAnswer here or at https://cloud.agenticcontrolplane.com/approvals";
 
 function fetchJson(status, body) {
   return async () => ({
@@ -115,8 +121,8 @@ const TOKEN_ENV = { ACP_BEARER_TOKEN: "test-token" };
 // (openclaw 2026.4.5, pi-embedded's runBeforeToolCallHook): block is
 // checked before requireApproval, so the two are mutually exclusive in
 // practice; allow-once/allow-always resolve to allowed, deny resolves to
-// blocked, and anything else is gated by timeoutBehavior (defaulting to
-// "deny" if unset — this plugin always sets it explicitly). Any drift
+// blocked, and anything else (timeout, cancelled) blocks — the host has no
+// timeout-behaviour field, timeoutReason only sets the text. Any drift
 // between this and the real host should show up as a test failure here,
 // not as a silent behavior change in production.
 function mockHostConsumeBeforeToolCall(hookResult, resolution) {
@@ -132,10 +138,7 @@ function mockHostConsumeBeforeToolCall(hookResult, resolution) {
   if (resolution === "deny") {
     return { blocked: true, reason: "Denied by user" };
   }
-  const timeoutBehavior = hookResult.requireApproval.timeoutBehavior ?? "deny";
-  return timeoutBehavior === "deny"
-    ? { blocked: true, reason: "Approval timed out" }
-    : { blocked: false };
+  return { blocked: true, reason: hookResult.requireApproval.timeoutReason ?? "Approval timed out" };
 }
 
 test("deny decision blocks with the server's reason", async () => {
@@ -264,9 +267,9 @@ test("allow decision passes through silently", async () => {
   assert.equal(stderr, "");
 });
 
-test("ask decision on a host that supports requireApproval opens an approval instead of blocking", async () => {
+test("ask decision on a user-started main-agent turn with approval support opens an approval instead of blocking", async () => {
   const { result } = await runHook(
-    interactiveCtx,
+    attendedCtx,
     fetchJson(200, { decision: "ask", reason: "spend over $50 needs approval" }),
     TOKEN_ENV,
     true
@@ -276,17 +279,98 @@ test("ask decision on a host that supports requireApproval opens an approval ins
   assert.equal(result.requireApproval.pluginId, "acp-governance");
   assert.match(result.requireApproval.title, /Bash/);
   assert.match(result.requireApproval.description, /spend over \$50 needs approval/);
-  assert.match(result.requireApproval.description, /ACP policy/);
-  // Never rely on the host's default — a call we can't get a real answer
-  // for must never fall open.
-  assert.equal(result.requireApproval.timeoutBehavior, "deny");
-  assert.equal(typeof result.requireApproval.timeoutMs, "number");
+  // One-time answers only; a timeout always blocks on the host, so there
+  // is no timeoutBehavior field to send.
+  assert.deepEqual(result.requireApproval.allowedDecisions, ["allow-once", "deny"]);
+  assert.equal(result.requireApproval.timeoutMs, 120000);
+  assert.equal(typeof result.requireApproval.timeoutReason, "string");
+  assert.ok(result.requireApproval.timeoutReason.length > 0);
+  assert.equal("timeoutBehavior" in result.requireApproval, false);
   assert.equal(typeof result.requireApproval.onResolution, "function");
+});
+
+for (const decision of ["ask", "step_up"]) {
+  test(`${decision} with a true claim returns only requireApproval with one-time decisions`, async () => {
+    const { result } = await runHook(
+      attendedCtx,
+      fetchJson(200, { decision, reason: "needs approval" }),
+      TOKEN_ENV,
+      true
+    );
+    assert.deepEqual(Object.keys(result), ["requireApproval"]);
+    assert.deepEqual(result.requireApproval.allowedDecisions, ["allow-once", "deny"]);
+    assert.equal(result.requireApproval.timeoutMs, 120000);
+    assert.ok(result.requireApproval.timeoutReason.length > 0);
+    assert.equal(Object.hasOwn(result.requireApproval, "timeoutBehavior"), false);
+  });
+}
+
+test("description starts with the gateway's three-line reason, whole and unchanged", async () => {
+  assert.ok(THREE_LINE_ASK.length < 200);
+  const { result } = await runHook(
+    attendedCtx,
+    fetchJson(200, { decision: "ask", reason: THREE_LINE_ASK }),
+    TOKEN_ENV,
+    true
+  );
+  assert.ok(
+    result.requireApproval.description.startsWith(THREE_LINE_ASK),
+    `description does not start with the gateway reason: ${JSON.stringify(result.requireApproval.description)}`
+  );
+  assert.ok(result.requireApproval.description.length <= 256);
+  assert.equal(result.requireApproval.title, "ACP asks: Bash");
+});
+
+test("a gateway reason over 256 characters is cut at 256 with an ellipsis", async () => {
+  const long = `ACP (Agentic Control Plane) asks: ${"x".repeat(400)}`;
+  const { result } = await runHook(
+    attendedCtx,
+    fetchJson(200, { decision: "ask", reason: long }),
+    TOKEN_ENV,
+    true
+  );
+  assert.equal(result.requireApproval.description.length, 256);
+  assert.ok(result.requireApproval.description.endsWith("…"));
+  assert.ok(long.startsWith(result.requireApproval.description.slice(0, 255)));
+});
+
+const NOBODY_CAN_BE_ASKED = [
+  ["a cron turn", cronCtx, true, /started by cron, not by a person/],
+  ["a turn with no trigger", interactiveCtx, true, /not started by a person/],
+  ["a subagent", { agentId: "ops-agent", sessionKey: "s1", trigger: "user" }, true, /subagent/],
+  ["a host with no approval support", attendedCtx, false, /no approval prompt/],
+];
+
+for (const [label, ctx, support, why] of NOBODY_CAN_BE_ASKED) {
+  test(`ask on ${label} blocks with the gateway reason unchanged, never requireApproval`, async () => {
+    const { result } = await runHook(
+      ctx,
+      fetchJson(200, { decision: "ask", reason: THREE_LINE_ASK }),
+      TOKEN_ENV,
+      support
+    );
+    assert.equal(result.block, true);
+    assert.equal(result.requireApproval, undefined);
+    assert.ok(result.blockReason.includes(THREE_LINE_ASK), "blockReason must contain the gateway reason unchanged");
+    assert.match(result.blockReason, /cannot ask here/);
+    assert.match(result.blockReason, why);
+  });
+}
+
+test("policy deny keeps the gateway reason unchanged, console link included", async () => {
+  const reason = "Blocked by policy: no shell. https://cloud.agenticcontrolplane.com/activity/abc";
+  const { result } = await runHook(
+    attendedCtx,
+    fetchJson(200, { decision: "deny", reason }),
+    TOKEN_ENV,
+    true
+  );
+  assert.deepEqual(result, { block: true, blockReason: `[ACP] ${reason}` });
 });
 
 test("ask maps to warning severity, step_up maps to critical", async () => {
   const ask = await runHook(
-    interactiveCtx,
+    attendedCtx,
     fetchJson(200, { decision: "ask", reason: "needs approval" }),
     TOKEN_ENV,
     true
@@ -294,7 +378,7 @@ test("ask maps to warning severity, step_up maps to critical", async () => {
   assert.equal(ask.result.requireApproval.severity, "warning");
 
   const stepUp = await runHook(
-    interactiveCtx,
+    attendedCtx,
     fetchJson(200, { decision: "step_up", reason: "elevated scope required" }),
     TOKEN_ENV,
     true
@@ -304,7 +388,7 @@ test("ask maps to warning severity, step_up maps to critical", async () => {
 
 test("description flags when the gateway already opened its own ACP-side approval", async () => {
   const { result } = await runHook(
-    interactiveCtx,
+    attendedCtx,
     fetchJson(200, {
       decision: "step_up",
       reason: "approval-requested: elevated scope required",
@@ -315,11 +399,24 @@ test("description flags when the gateway already opened its own ACP-side approva
   assert.match(result.requireApproval.description, /already exists/);
   assert.match(result.requireApproval.description, /cloud\.agenticcontrolplane\.com/);
   assert.match(result.requireApproval.description, /asked twice/);
+  assert.ok(result.requireApproval.description.startsWith("approval-requested: elevated scope required"));
+  assert.ok(result.requireApproval.description.length <= 256);
+});
+
+test("the already-exists note is dropped when it would not fit after the gateway reason", async () => {
+  const reason = `approval-pending: ${"y".repeat(200)}`;
+  const { result } = await runHook(
+    attendedCtx,
+    fetchJson(200, { decision: "step_up", reason }),
+    TOKEN_ENV,
+    true
+  );
+  assert.equal(result.requireApproval.description, reason);
 });
 
 test("description stays plain when no ACP-side approval already exists", async () => {
   const { result } = await runHook(
-    interactiveCtx,
+    attendedCtx,
     fetchJson(200, { decision: "ask", reason: "spend over $50 needs approval" }),
     TOKEN_ENV,
     true
@@ -336,7 +433,7 @@ const ALLOWING_RESOLUTIONS = new Set(["allow-once", "allow-always"]);
 for (const resolution of RESOLUTIONS) {
   test(`resolution "${resolution}" ${ALLOWING_RESOLUTIONS.has(resolution) ? "allows" : "blocks"} the call`, async () => {
     const { result } = await runHook(
-      interactiveCtx,
+      attendedCtx,
       fetchJson(200, { decision: "ask", reason: "needs approval" }),
       TOKEN_ENV,
       true
@@ -347,7 +444,7 @@ for (const resolution of RESOLUTIONS) {
 
   test(`onResolution logs "${resolution}" to stderr`, async () => {
     const { result, stderr: setupStderr } = await runHook(
-      interactiveCtx,
+      attendedCtx,
       fetchJson(200, { decision: "ask", reason: "needs approval" }),
       TOKEN_ENV,
       true

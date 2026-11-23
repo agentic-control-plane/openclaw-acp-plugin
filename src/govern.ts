@@ -3,7 +3,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { getApiBase, readToken } from "./credentials.js";
 
-export const PLUGIN_VERSION = "0.2.1";
+export const PLUGIN_VERSION = "0.2.2";
 
 export const KEY_REJECTED_FIX =
   "Fix: re-run the installer (curl -sf https://agenticcontrolplane.com/install.sh | bash) or create a key at https://cloud.agenticcontrolplane.com/settings/api-keys and save it: echo 'gsk_...' > ~/.acp/credentials";
@@ -74,9 +74,10 @@ export type GovernResult = {
  *   deny               → blocked, server's reason
  *   ask / step_up      → not allowed, raw server reason returned as-is.
  *                        plugin.ts decides how to surface this: OpenClaw's
- *                        requireApproval primitive when the host supports
- *                        it, otherwise a hard block telling the human to
- *                        approve in the ACP console and re-run.
+ *                        requireApproval primitive when a person can be
+ *                        asked (attended claim true), otherwise a hard block
+ *                        telling the human to approve in the ACP console
+ *                        and re-run.
  *   anything else       → blocked (unrecognized/missing decision — a verdict
  *                        this client can't interpret must never fall open)
  *
@@ -93,10 +94,13 @@ export async function checkAcpGovernance(opts: {
   agentId: string;
   sessionKey?: string;
   agentTier?: string;
-  // #1518: the host's runtime probe for whether its approval service is
-  // present (PluginApprovalResolutions). Sent only on the PreToolUse call.
-  // When true, the plugin renders a native approval prompt on "ask".
-  approvalServiceAvailable?: boolean;
+  // Whether a person can be asked on this call, as computed by plugin.ts:
+  // the host supports plugin approvals AND the turn was started by a user
+  // AND the agent is interactive. `mode` is the turn's trigger ("user",
+  // "cron" ...) or "none". Sent only on the PreToolUse call. When the claim
+  // is true, the plugin renders a native approval prompt on "ask". Absent
+  // means nothing is sent.
+  attended?: { claim: boolean; mode?: string };
 }): Promise<GovernResult> {
   const tier = opts.agentTier || "interactive";
   const failsOpen = tier === "interactive";
@@ -172,12 +176,16 @@ export async function checkAcpGovernance(opts: {
         session_id: opts.sessionKey,
         agent_tier: tier,
         client: { name: "OpenClaw", version: "0.1.0" },
-        // #1518: positive claim only from the runtime probe; false is a
+        // Positive claim only when plugin.ts computed one; false is a
         // positive "nobody will see a dialog" and always wins at the gateway.
-        ...(typeof opts.approvalServiceAvailable === "boolean"
+        ...(opts.attended && typeof opts.attended.claim === "boolean"
           ? {
-              attended: { claim: opts.approvalServiceAvailable, source: "approval-service" },
-              ...(opts.approvalServiceAvailable ? { capabilities: ["native_ask"] } : {}),
+              attended: {
+                claim: opts.attended.claim === true,
+                source: "approval-service",
+                ...(typeof opts.attended.mode === "string" ? { mode: opts.attended.mode.slice(0, 32) } : {}),
+              },
+              ...(opts.attended.claim === true ? { capabilities: ["native_ask"] } : {}),
             }
           : {}),
       }),

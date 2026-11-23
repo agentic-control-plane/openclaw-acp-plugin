@@ -152,6 +152,16 @@ function buildApprovalSpec(params: {
   return { title, description, severity };
 }
 
+// Replaces every control or line-separator character with a space.
+function toOneLine(value: string): string {
+  return Array.from(value, (ch) => {
+    const code = ch.codePointAt(0) ?? 0;
+    const breaksLine =
+      code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029;
+    return breaksLine ? " " : ch;
+  }).join("");
+}
+
 // A person can be asked only when the host can show a plugin approval, the
 // turn was started by a user (the host itself blocks a plugin approval on
 // cron, heartbeat or memory turns) and the agent is the interactive one. A
@@ -167,11 +177,16 @@ function computeAttended(params: {
     return { claim: false, mode, why: "this OpenClaw build has no approval prompt" };
   }
   if (params.trigger !== "user") {
+    // The block text goes back to the agent, so the host's trigger string
+    // is shown bounded and on one line, never at full length.
+    const shownTrigger = params.trigger
+      ? toOneLine(params.trigger).slice(0, MODE_MAX)
+      : "";
     return {
       claim: false,
       mode,
-      why: params.trigger
-        ? `this turn was started by ${params.trigger}, not by a person`
+      why: shownTrigger.trim()
+        ? `this turn was started by ${shownTrigger}, not by a person`
         : "this turn was not started by a person",
     };
   }

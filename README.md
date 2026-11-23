@@ -29,7 +29,7 @@ The plugin registers a `before_tool_call` hook that fires before every tool exec
 
 ## When you are asked
 
-OpenClaw shows an approval prompt for an `ask` only when all three are true: you started the turn yourself (by typing a message), the call comes from the `main` agent, and your OpenClaw build supports plugin approvals. The prompt shows ACP's own text first and offers only "allow once" and "deny". If nobody answers within 2 minutes, the call is blocked.
+OpenClaw shows an approval prompt for an `ask` only when all three are true: you started the turn yourself (by typing a message), the call comes from the `main` agent (a call with no agent id counts as `main`), and your OpenClaw build supports plugin approvals. The prompt shows ACP's own text first and offers only "allow once" and "deny". If nobody answers within 2 minutes, the call is blocked.
 
 In every other case the call is blocked, not asked. That includes scheduled turns (cron and heartbeat), memory turns, calls from named agents, and OpenClaw builds without approval prompts. The block message says why and includes ACP's text with its console link. Approve the call in the ACP console, then run it again.
 

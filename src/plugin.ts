@@ -108,7 +108,6 @@ function hostSupportsRequireApproval(): boolean {
 const APPROVAL_TITLE_MAX = 80;
 const APPROVAL_DESCRIPTION_MAX = 256;
 const APPROVAL_TIMEOUT_MS = 120000;
-const MODE_MAX = 32;
 
 // Only one-time answers. Whether the host remembers allow-always for plugin
 // approvals is unconfirmed; if it did, a later gateway ask would run unasked.
@@ -152,46 +151,57 @@ function buildApprovalSpec(params: {
   return { title, description, severity };
 }
 
-// Replaces every control or line-separator character with a space.
-function toOneLine(value: string): string {
-  return Array.from(value, (ch) => {
-    const code = ch.codePointAt(0) ?? 0;
-    const breaksLine =
-      code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029;
-    return breaksLine ? " " : ch;
-  }).join("");
+// A trigger is sent to the gateway and shown in the block text (which goes
+// back to the agent) only when it is a plain lowercase word. Anything else,
+// including control, bidi or zero-width characters, a broken surrogate or
+// sentence text, becomes the fixed word "unknown".
+const SAFE_TRIGGER = /^[a-z0-9_-]{1,32}$/;
+const UNSAFE_TRIGGER_WORD = "unknown";
+
+function safeTrigger(trigger: string): string {
+  return SAFE_TRIGGER.test(trigger) ? trigger : UNSAFE_TRIGGER_WORD;
+}
+
+// OpenClaw gives subagent runs session keys of the form
+// `agent:<agentId>:subagent:<uuid>`, even when the parent is `main`.
+function isSubagentSession(sessionKey: unknown): boolean {
+  return typeof sessionKey === "string" && sessionKey.includes(":subagent:");
 }
 
 // A person can be asked only when the host can show a plugin approval, the
 // turn was started by a user (the host itself blocks a plugin approval on
-// cron, heartbeat or memory turns) and the agent is the interactive one. A
-// missing trigger is never a claim. `why` explains a false claim in the
-// block text.
+// cron, heartbeat or memory turns), the agent id is exactly `main`, and the
+// session is not a subagent run. Every hook-context field is optional on the
+// host, so a missing trigger or agent id is never a claim. `why` explains a
+// false claim in the block text.
 function computeAttended(params: {
   hostSupports: boolean;
   trigger: string | undefined;
-  agentTier: string;
+  agentId: string | undefined;
+  sessionKey: unknown;
 }): { claim: boolean; mode: string; why: string } {
-  const mode = (params.trigger || "none").slice(0, MODE_MAX);
+  const shown = params.trigger === undefined ? undefined : safeTrigger(params.trigger);
+  const mode = shown ?? "none";
   if (!params.hostSupports) {
     return { claim: false, mode, why: "this OpenClaw build has no approval prompt" };
   }
   if (params.trigger !== "user") {
-    // The block text goes back to the agent, so the host's trigger string
-    // is shown bounded and on one line, never at full length.
-    const shownTrigger = params.trigger
-      ? toOneLine(params.trigger).slice(0, MODE_MAX)
-      : "";
     return {
       claim: false,
       mode,
-      why: shownTrigger.trim()
-        ? `this turn was started by ${shownTrigger}, not by a person`
+      why: shown
+        ? `this turn was started by ${shown}, not by a person`
         : "this turn was not started by a person",
     };
   }
-  if (params.agentTier !== "interactive") {
+  if (params.agentId === undefined) {
+    return { claim: false, mode, why: "this call has no agent id, so it cannot be tied to the main agent" };
+  }
+  if (params.agentId !== "main") {
     return { claim: false, mode, why: "this call came from a subagent, not the main agent" };
+  }
+  if (isSubagentSession(params.sessionKey)) {
+    return { claim: false, mode, why: "this call came from a subagent run, not the main agent" };
   }
   return { claim: true, mode, why: "" };
 }
@@ -222,7 +232,14 @@ export default definePluginEntry({
           probeError = err;
         }
         const trigger = typeof ctx.trigger === "string" && ctx.trigger ? ctx.trigger : undefined;
-        const attended = computeAttended({ hostSupports, trigger, agentTier });
+        // The claim reads the raw agent id; the "unknown" fallback above
+        // only sets the outage posture, never a claim of a person.
+        const attended = computeAttended({
+          hostSupports,
+          trigger,
+          agentId: typeof ctx.agentId === "string" ? ctx.agentId : undefined,
+          sessionKey: ctx.sessionKey,
+        });
         const result = await checkAcpGovernance({
           toolName: event.toolName,
           toolInput: JSON.stringify(event.params),

@@ -10,14 +10,15 @@ interface PluginHookBeforeToolCallEvent {
 }
 
 interface PluginHookAgentContext {
-  runId: string;
-  agentId: string;
-  sessionKey: string;
-  sessionId: string;
-  modelProviderId: string;
-  modelId: string;
-  trigger: string;
-  channelId: string;
+  runId?: string;
+  agentId?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  modelProviderId?: string;
+  modelId?: string;
+  // What started this turn: "user", "cron", "heartbeat", "memory" ...
+  trigger?: string;
+  channelId?: string;
 }
 
 interface OpenClawPluginApi {
@@ -33,14 +34,19 @@ interface OpenClawPluginApi {
 // without the openclaw package present.
 type PluginApprovalResolution = "allow-once" | "allow-always" | "deny" | "timeout" | "cancelled";
 
+// The host's before_tool_call `requireApproval` shape (OpenClaw 2026.11.x).
+// There is no timeout-behaviour field: a timeout always blocks, and
+// `timeoutReason` only sets the text shown.
 type RequireApprovalSpec = {
-  pluginId: string;
   title: string;
   description: string;
-  severity: "warning" | "critical";
-  timeoutMs: number;
-  timeoutBehavior: "deny" | "allow";
-  onResolution: (resolution: PluginApprovalResolution) => void;
+  scope?: string;
+  severity?: "info" | "warning" | "critical";
+  timeoutMs?: number;
+  timeoutReason?: string;
+  allowedDecisions?: ("allow-once" | "allow-always" | "deny")[];
+  pluginId?: string;
+  onResolution?: (resolution: PluginApprovalResolution) => void;
 };
 
 function resolveAgentTier(agentId: string): string {
@@ -101,6 +107,14 @@ function hostSupportsRequireApproval(): boolean {
 
 const APPROVAL_TITLE_MAX = 80;
 const APPROVAL_DESCRIPTION_MAX = 256;
+const APPROVAL_TIMEOUT_MS = 120000;
+
+// Only one-time answers. Whether the host remembers allow-always for plugin
+// approvals is unconfirmed; if it did, a later gateway ask would run unasked.
+const ALLOWED_DECISIONS: ("allow-once" | "deny")[] = ["allow-once", "deny"];
+
+const APPROVAL_TIMEOUT_REASON =
+  "[ACP] Nobody answered the approval prompt in 2 minutes, so the call was not run.";
 
 // The gateway prefixes `reason` this way when it has already opened its
 // own approval doc for this call (step_up creates one server-side and
@@ -120,16 +134,76 @@ function buildApprovalSpec(params: {
   reason: string;
 }): { title: string; description: string; severity: "warning" | "critical" } {
   const alreadyInAcp = ACP_APPROVAL_EXISTS_PREFIXES.some((prefix) => params.reason.startsWith(prefix));
-  const title = truncate(`ACP approval needed: ${params.toolName}`, APPROVAL_TITLE_MAX);
-  const base = `${params.toolName}: ${params.reason} — this rule came from your workspace's ACP policy.`;
-  const existingApprovalNote = alreadyInAcp
-    ? " An ACP approval for this call already exists at cloud.agenticcontrolplane.com — approving here does not resolve it, so you may be asked twice for the same call."
-    : "";
-  const description = truncate(`${base}${existingApprovalNote}`, APPROVAL_DESCRIPTION_MAX);
+  const title = truncate(`ACP asks: ${params.toolName}`, APPROVAL_TITLE_MAX);
+  // The gateway's reason comes first and unchanged; it is cut only if it
+  // alone exceeds the limit. The note is added only when the whole text
+  // still fits.
+  const existingApprovalNote =
+    "An ACP approval for this call already exists at cloud.agenticcontrolplane.com — approving here does not resolve it, so you may be asked twice for the same call.";
+  const withNote = `${params.reason}\n\n${existingApprovalNote}`;
+  const description =
+    alreadyInAcp && withNote.length <= APPROVAL_DESCRIPTION_MAX
+      ? withNote
+      : truncate(params.reason, APPROVAL_DESCRIPTION_MAX);
   // step_up is the higher bar — an elevated-scope requirement, not just a
   // policy threshold — so it gets the top severity band.
   const severity = params.decision === "step_up" ? "critical" : "warning";
   return { title, description, severity };
+}
+
+// A trigger is sent to the gateway and shown in the block text (which goes
+// back to the agent) only when it is a plain lowercase word. Anything else,
+// including control, bidi or zero-width characters, a broken surrogate or
+// sentence text, becomes the fixed word "unknown".
+const SAFE_TRIGGER = /^[a-z0-9_-]{1,32}$/;
+const UNSAFE_TRIGGER_WORD = "unknown";
+
+function safeTrigger(trigger: string): string {
+  return SAFE_TRIGGER.test(trigger) ? trigger : UNSAFE_TRIGGER_WORD;
+}
+
+// OpenClaw gives subagent runs session keys of the form
+// `agent:<agentId>:subagent:<uuid>`, even when the parent is `main`.
+function isSubagentSession(sessionKey: unknown): boolean {
+  return typeof sessionKey === "string" && sessionKey.includes(":subagent:");
+}
+
+// A person can be asked only when the host can show a plugin approval, the
+// turn was started by a user (the host itself blocks a plugin approval on
+// cron, heartbeat or memory turns), the agent id is exactly `main`, and the
+// session is not a subagent run. Every hook-context field is optional on the
+// host, so a missing trigger or agent id is never a claim. `why` explains a
+// false claim in the block text.
+function computeAttended(params: {
+  hostSupports: boolean;
+  trigger: string | undefined;
+  agentId: string | undefined;
+  sessionKey: unknown;
+}): { claim: boolean; mode: string; why: string } {
+  const shown = params.trigger === undefined ? undefined : safeTrigger(params.trigger);
+  const mode = shown ?? "none";
+  if (!params.hostSupports) {
+    return { claim: false, mode, why: "this OpenClaw build has no approval prompt" };
+  }
+  if (params.trigger !== "user") {
+    return {
+      claim: false,
+      mode,
+      why: shown
+        ? `this turn was started by ${shown}, not by a person`
+        : "this turn was not started by a person",
+    };
+  }
+  if (params.agentId === undefined) {
+    return { claim: false, mode, why: "this call has no agent id, so it cannot be tied to the main agent" };
+  }
+  if (params.agentId !== "main") {
+    return { claim: false, mode, why: "this call came from a subagent, not the main agent" };
+  }
+  if (isSubagentSession(params.sessionKey)) {
+    return { claim: false, mode, why: "this call came from a subagent run, not the main agent" };
+  }
+  return { claim: true, mode, why: "" };
 }
 
 export default definePluginEntry({
@@ -146,19 +220,33 @@ export default definePluginEntry({
         ctx: PluginHookAgentContext
       ) => {
         const agentId = ctx.agentId ?? "unknown";
+        const agentTier = resolveAgentTier(agentId);
+        let hostSupports = false;
+        let probeError: unknown = undefined;
+        let probeFailed = false;
+        try {
+          hostSupports = hostSupportsRequireApproval() === true;
+        } catch (err) {
+          // a probe that throws is not a claim of attendance
+          probeFailed = true;
+          probeError = err;
+        }
+        const trigger = typeof ctx.trigger === "string" && ctx.trigger ? ctx.trigger : undefined;
+        // The claim reads the raw agent id; the "unknown" fallback above
+        // only sets the outage posture, never a claim of a person.
+        const attended = computeAttended({
+          hostSupports,
+          trigger,
+          agentId: typeof ctx.agentId === "string" ? ctx.agentId : undefined,
+          sessionKey: ctx.sessionKey,
+        });
         const result = await checkAcpGovernance({
           toolName: event.toolName,
           toolInput: JSON.stringify(event.params),
           agentId,
           sessionKey: ctx.sessionKey,
-          agentTier: resolveAgentTier(agentId),
-          approvalServiceAvailable: (() => {
-            try {
-              return hostSupportsRequireApproval();
-            } catch {
-              return false; // a probe that throws is not a claim of attendance
-            }
-          })(),
+          agentTier,
+          attended: { claim: attended.claim, mode: attended.mode },
         });
 
         // before_tool_call's return value only merges params/block/
@@ -179,7 +267,10 @@ export default definePluginEntry({
             // has its own outer catch around plugin hooks that would also
             // block on a thrown error, but this doesn't rely on that.)
             try {
-              if (hostSupportsRequireApproval()) {
+              if (probeFailed) throw probeError;
+              // Only the claim sent to the gateway opens a prompt: the
+              // same answer both sides act on.
+              if (attended.claim) {
                 const { title, description, severity } = buildApprovalSpec({
                   toolName: event.toolName,
                   decision: result.decision,
@@ -190,11 +281,11 @@ export default definePluginEntry({
                   title,
                   description,
                   severity,
-                  timeoutMs: 120000,
-                  // Explicit, not the runtime default — a call this
-                  // client can't get a real answer for must never fall
-                  // open.
-                  timeoutBehavior: "deny",
+                  timeoutMs: APPROVAL_TIMEOUT_MS,
+                  // A timeout always blocks on the host; this only sets
+                  // the text.
+                  timeoutReason: APPROVAL_TIMEOUT_REASON,
+                  allowedDecisions: [...ALLOWED_DECISIONS],
                   onResolution: (resolution) => {
                     process.stderr.write(`[ACP] approval ${resolution} for ${event.toolName}\n`);
                   },
@@ -208,14 +299,14 @@ export default definePluginEntry({
                 blockReason: `[ACP] ${result.reason} (approval setup failed)`,
               };
             }
-            // No verified approval support on this host: block, and point
-            // at where the approval actually lives. Only this path and the
-            // spec-build failure above are approvable — a policy deny, an
-            // unrecognized verdict, or a fail-closed outage are not, so
-            // they must not carry the same instruction.
+            // Nobody can be asked here: block, say why, and show the
+            // gateway's own text (with its console link) unchanged. Only
+            // this path and the spec-build failure above are approvable —
+            // a policy deny, an unrecognized verdict, or a fail-closed
+            // outage are not, so they must not carry the same instruction.
             return {
               block: true,
-              blockReason: `[ACP] ${result.reason} — approve in the ACP console (cloud.agenticcontrolplane.com), then re-run.`,
+              blockReason: `[ACP] This call needs a person's approval and OpenClaw cannot ask here (${attended.why}), so it is blocked. Approve it in the ACP console, then run it again.\n\n${result.reason}`,
             };
           }
 

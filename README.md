@@ -24,8 +24,14 @@ The plugin registers a `before_tool_call` hook that fires before every tool exec
 
 1. The hook sends the tool name and input to ACP's governance API.
 2. ACP evaluates the safety floor and your policies (agent tier, tool rules, rate limits, content scanning).
-3. It returns `allow`, `ask` or `deny`. Today the gateway sends a hold as a prompt only to Claude Code, so in OpenClaw an `ask` is blocked with an approval link: approve on the console or from the email, then retry. The plugin can render OpenClaw's own prompt once the gateway sends asks to OpenClaw.
+3. It returns `allow`, `ask` or `deny`.
 4. All calls are logged to your workspace's audit trail.
+
+## When you are asked
+
+OpenClaw shows an approval prompt for an `ask` only when all three are true: you started the turn yourself (by typing a message), the call carries the agent id `main` (a call with no agent id is not asked), and your OpenClaw build supports plugin approvals. Subagent runs are never treated as a person, even when `main` started them. The prompt shows ACP's own text first and offers only "allow once" and "deny". If nobody answers within 2 minutes, the call is blocked.
+
+In every other case the call is blocked, not asked. That includes scheduled turns (cron and heartbeat), memory turns, calls from named agents, and OpenClaw builds without approval prompts. The block message says why and includes ACP's text with its console link. Approve the call in the ACP console, then run it again.
 
 If ACP is unreachable, calls from the `main` agent proceed with an UNGOVERNED warning. Calls from named agents (the subagent tier) are blocked until ACP answers. If hooks are switched off, nothing is checked.
 
